@@ -58,6 +58,16 @@ def test_negated_worry_signal_is_softened() -> None:
     assert "has_emotion_signal" not in analysis.reason_codes
 
 
+def test_strong_relationship_memory_can_reach_critical() -> None:
+    """A future-facing relationship worry should reach the critical bucket."""
+    analysis = analyze_text("恋人との将来のことで不安が強くて、次回会う前に自分の気持ちをちゃんと決めたい。")
+
+    assert analysis.save_strength >= 0.50
+    assert analysis.memory_priority == "critical"
+    assert "has_relationship" in analysis.reason_codes
+    assert "has_worry" in analysis.reason_codes
+
+
 def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
     """The API should create and list memories using the configured store."""
     db_path = str(tmp_path / "api_memories.db")

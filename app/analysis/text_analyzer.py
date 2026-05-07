@@ -369,25 +369,31 @@ def _score_text(
 def _score_save_strength(scores: dict[str, float], reason_codes: list[str]) -> float:
     """Compute a unified save strength while keeping all memories stored."""
     strength = (
-        0.30 * scores["persistence_value"]
-        + 0.20 * scores["affective_value"]
-        + 0.15 * scores["identity_value"]
-        + 0.10 * scores["relationship_value"]
+        0.24 * scores["persistence_value"]
+        + 0.18 * scores["affective_value"]
+        + 0.16 * scores["identity_value"]
+        + 0.16 * scores["relationship_value"]
         + 0.10 * scores["practical_value"]
-        + 0.10 * scores["task_value"]
-        + 0.05 * scores["retrieval_value"]
+        + 0.08 * scores["task_value"]
+        + 0.08 * scores["retrieval_value"]
     )
 
     if "has_sensitive_topic" in reason_codes:
-        strength += 0.05
+        strength += 0.08
     if "has_decision_support" in reason_codes:
-        strength += 0.05
+        strength += 0.06
     if "has_future_reference" in reason_codes:
-        strength += 0.04
+        strength += 0.05
     if "has_named_entity" in reason_codes:
-        strength += 0.04
+        strength += 0.05
+    if "has_reflection" in reason_codes:
+        strength += 0.05
+    if "has_worry" in reason_codes:
+        strength += 0.05
+    if "has_relationship" in reason_codes:
+        strength += 0.06
     if "is_short_ack" in reason_codes:
-        strength -= 0.18
+        strength -= 0.20
     if "is_low_information" in reason_codes:
         strength -= 0.10
     if reason_codes == ["is_context_only"]:
@@ -398,11 +404,11 @@ def _score_save_strength(scores: dict[str, float], reason_codes: list[str]) -> f
 
 def _memory_priority(save_strength: float) -> str:
     """Bucket save strength into a simple priority label."""
-    if save_strength >= 0.80:
+    if save_strength >= 0.50:
         return "critical"
-    if save_strength >= 0.55:
+    if save_strength >= 0.40:
         return "high"
-    if save_strength >= 0.30:
+    if save_strength >= 0.22:
         return "medium"
     return "low"
 
