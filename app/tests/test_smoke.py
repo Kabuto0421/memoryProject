@@ -2,6 +2,7 @@
 
 from fastapi.testclient import TestClient
 
+from app.analysis.text_analyzer import analyze_text
 from app.api.main import app, healthcheck
 from app.memory.store import create_memory, init_db, list_memories
 
@@ -39,6 +40,24 @@ def test_short_ack_is_low_priority_but_still_saved(tmp_path) -> None:
     assert "is_short_ack" in created["reason_codes"]
 
 
+def test_ginza_extracts_lemma_based_reflection_and_keywords() -> None:
+    """Inflected verbs should still contribute to memory typing and keywords."""
+    analysis = analyze_text("AIに相談できると助かると感じた。")
+
+    assert "reflection" in analysis.memory_types
+    assert "感ずる" in analysis.keywords
+
+
+def test_negated_worry_signal_is_softened() -> None:
+    """Negated worry expressions should not be treated as strong worry memories."""
+    analysis = analyze_text("不安はないので大丈夫。")
+
+    assert analysis.emotion["primary"] == "neutral"
+    assert "worry" not in analysis.memory_types
+    assert "has_negation" in analysis.reason_codes
+    assert "has_emotion_signal" not in analysis.reason_codes
+
+
 def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
     """The API should create and list memories using the configured store."""
     db_path = str(tmp_path / "api_memories.db")
@@ -55,3 +74,4 @@ def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
     assert list_response.json()["count"] >= 1
     assert "save_strength" in create_response.json()
     assert "reason_codes" in create_response.json()
+    assert "entities" in create_response.json()["memory"]

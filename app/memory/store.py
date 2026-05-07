@@ -38,6 +38,7 @@ def init_db(db_path: str | None = None) -> None:
                 memory_types_json TEXT NOT NULL,
                 topics_json TEXT NOT NULL,
                 keywords_json TEXT NOT NULL,
+                entities_json TEXT NOT NULL DEFAULT '[]',
                 facets_json TEXT NOT NULL,
                 scores_json TEXT NOT NULL,
                 emotion_json TEXT NOT NULL,
@@ -60,6 +61,8 @@ def init_db(db_path: str | None = None) -> None:
             conn.execute("ALTER TABLE memories ADD COLUMN memory_priority TEXT NOT NULL DEFAULT 'low'")
         if "reason_codes_json" not in existing_columns:
             conn.execute("ALTER TABLE memories ADD COLUMN reason_codes_json TEXT NOT NULL DEFAULT '[]'")
+        if "entities_json" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
@@ -77,6 +80,7 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
         "memory_types": analysis.memory_types,
         "topics": analysis.topics,
         "keywords": analysis.keywords,
+        "entities": analysis.entities,
         "facets": analysis.facets,
         "scores": analysis.scores,
         "emotion": analysis.emotion,
@@ -93,9 +97,9 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
             """
             INSERT INTO memories (
                 id, raw_text, summary, memory_types_json, topics_json, keywords_json,
-                facets_json, scores_json, emotion_json, recall_policy_json, safety_json,
+                entities_json, facets_json, scores_json, emotion_json, recall_policy_json, safety_json,
                 save_strength, memory_priority, reason_codes_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory["id"],
@@ -104,6 +108,7 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
                 _dump_json(memory["memory_types"]),
                 _dump_json(memory["topics"]),
                 _dump_json(memory["keywords"]),
+                _dump_json(memory["entities"]),
                 _dump_json(memory["facets"]),
                 _dump_json(memory["scores"]),
                 _dump_json(memory["emotion"]),
@@ -151,6 +156,7 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
         "memory_types": _load_json(row["memory_types_json"]),
         "topics": _load_json(row["topics_json"]),
         "keywords": _load_json(row["keywords_json"]),
+        "entities": _load_json(row["entities_json"]),
         "facets": _load_json(row["facets_json"]),
         "scores": _load_json(row["scores_json"]),
         "emotion": _load_json(row["emotion_json"]),

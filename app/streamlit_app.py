@@ -50,12 +50,4 @@ for memory in list_memories(limit=20):
             f"save_strength={memory['save_strength']} | "
             f"created_at={memory['created_at']}"
         )
-        st.json(
-            {
-                "topics": memory["topics"],
-                "scores": memory["scores"],
-                "reason_codes": memory["reason_codes"],
-                "recall_policy": memory["recall_policy"],
-            },
-            expanded=False,
-        )
+        st.json(memory, expanded=False)

@@ -1,14 +1,15 @@
-"""Simple rule-based analyzer for conversational long-term memories."""
+"""GiNZA-backed analyzer for conversational long-term memories."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+
+import spacy
+from spacy.tokens import Doc, Token
 
 
-WORD_RE = re.compile(r"[A-Za-z0-9_./:-]+|[一-龠ぁ-んァ-ヶー]+")
-
-EMOTION_KEYWORDS = {
+TEXT_EMOTION_RULES = {
     "joy": ["嬉しい", "楽しい", "最高", "安心", "よかった"],
     "sadness": ["悲しい", "寂しい", "つらい", "しんどい"],
     "frustration": ["面倒", "困る", "嫌", "詰まった", "わからない", "おかしくないか"],
@@ -16,9 +17,17 @@ EMOTION_KEYWORDS = {
     "curiosity": ["気になる", "知りたい", "興味", "試したい"],
 }
 
-MEMORY_TYPE_RULES = {
-    "preference": ["好き", "嫌い", "苦手", "好む", "避けたい"],
-    "desire": ["したい", "ほしい", "欲しい", "望む"],
+LEMMA_EMOTION_RULES = {
+    "joy": {"嬉しい", "楽しい", "安心"},
+    "sadness": {"悲しい", "寂しい", "つらい", "しんどい"},
+    "frustration": {"困る", "嫌", "詰まる", "わかる"},
+    "anxiety": {"不安", "怖い", "心配", "気になる"},
+    "curiosity": {"知る", "興味", "試す", "気になる"},
+}
+
+TEXT_MEMORY_TYPE_RULES = {
+    "preference": ["好き", "嫌い", "苦手", "避けたい"],
+    "desire": ["したい", "ほしい", "欲しい"],
     "worry": ["不安", "心配", "困る", "怖い"],
     "reflection": ["思う", "感じる", "おかしくないか", "違和感"],
     "relationship": ["友達", "家族", "母", "父", "恋人", "先輩", "後輩"],
@@ -26,10 +35,36 @@ MEMORY_TYPE_RULES = {
     "task": ["やる", "作る", "確認", "調べる", "直す"],
 }
 
+LEMMA_MEMORY_TYPE_RULES = {
+    "preference": {"好き", "嫌い", "苦手", "好む", "避ける"},
+    "desire": {"望む"},
+    "worry": {"不安", "心配", "困る", "怖い"},
+    "reflection": {"思う", "感じる", "感ずる", "違和感"},
+    "relationship": {"友達", "家族", "母", "父", "恋人", "先輩", "後輩"},
+    "decision_support": {"決める", "選ぶ", "迷う"},
+    "task": {"やる", "作る", "確認", "調べる", "直す"},
+}
+
 FUTURE_TERMS = ["明日", "来週", "あとで", "次回", "今度", "締切"]
 SENSITIVE_TERMS = ["病気", "トラウマ", "家族", "お金", "秘密", "恋人"]
 TECHNICAL_MARKERS = [".py", ".md", "http://", "https://", "/", "SQLite", "FastAPI", "Streamlit"]
 SHORT_ACK_TERMS = ["ありがとう", "了解", "OK", "なるほど", "たしかに", "うん", "そうだね"]
+TARGET_POS = {"NOUN", "PROPN", "VERB", "ADJ"}
+TOPIC_POS = {"NOUN", "PROPN"}
+NEGATION_LEMMAS = {"ない", "ぬ", "ず"}
+
+
+@dataclass(slots=True)
+class ParsedText:
+    """Intermediate GiNZA parse result used by the analyzer."""
+
+    tokens: list[str]
+    lemmas: list[str]
+    topics: list[str]
+    keywords: list[str]
+    entities: list[str]
+    negated_lemmas: set[str]
+    negated_terms: set[str]
 
 
 @dataclass(slots=True)
@@ -39,6 +74,7 @@ class AnalysisResult:
     summary: str
     topics: list[str]
     keywords: list[str]
+    entities: list[str]
     memory_types: list[str]
     facets: dict[str, dict[str, object]]
     scores: dict[str, float]
@@ -54,27 +90,31 @@ class AnalysisResult:
         return asdict(self)
 
 
+@lru_cache(maxsize=1)
+def get_nlp():
+    """Load the GiNZA pipeline once per process."""
+    return spacy.load("ja_ginza")
+
+
 def analyze_text(text: str) -> AnalysisResult:
     """Analyze raw conversational text into memory facets and scores."""
     cleaned = text.strip()
-    tokens = WORD_RE.findall(cleaned)
-    unique_tokens = _unique_preserve(tokens)
+    parsed = _parse_text(cleaned)
     summary = cleaned[:120]
-    topics = unique_tokens[:5]
-    keywords = _extract_keywords(unique_tokens)
-    memory_types = _infer_memory_types(cleaned)
-    emotion = _infer_emotion(cleaned)
-    scores = _score_text(cleaned, memory_types, topics, emotion)
-    reason_codes = _collect_reason_codes(cleaned, memory_types, topics, emotion)
+    memory_types = _infer_memory_types(cleaned, parsed)
+    emotion = _infer_emotion(cleaned, parsed)
+    scores = _score_text(cleaned, parsed, memory_types, emotion)
+    reason_codes = _collect_reason_codes(cleaned, parsed, memory_types, emotion)
     save_strength = _score_save_strength(scores, reason_codes)
     memory_priority = _memory_priority(save_strength)
     recall_policy = _build_recall_policy(cleaned, scores)
     safety = _build_safety(cleaned)
-    facets = _build_facets(cleaned, memory_types, emotion, topics)
+    facets = _build_facets(cleaned, parsed, memory_types, emotion)
     return AnalysisResult(
         summary=summary,
-        topics=topics,
-        keywords=keywords,
+        topics=parsed.topics,
+        keywords=parsed.keywords,
+        entities=parsed.entities,
         memory_types=memory_types,
         facets=facets,
         scores=scores,
@@ -85,6 +125,65 @@ def analyze_text(text: str) -> AnalysisResult:
         memory_priority=memory_priority,
         reason_codes=reason_codes,
     )
+
+
+def _parse_text(text: str) -> ParsedText:
+    """Parse text with GiNZA and derive normalized tokens."""
+    doc = get_nlp()(text)
+    tokens = [token.text for token in doc if not token.is_space]
+    lemmas = [token.lemma_ for token in doc if not token.is_space]
+    entities = _unique_preserve([ent.text for ent in doc.ents if ent.text.strip()])
+    topics = _extract_topics(doc, entities)
+    keywords = _extract_keywords(doc, entities)
+    return ParsedText(
+        tokens=tokens,
+        lemmas=lemmas,
+        topics=topics,
+        keywords=keywords,
+        entities=entities,
+        negated_lemmas={token.lemma_ for token in doc if _is_negated(token)},
+        negated_terms={token.text for token in doc if _is_negated(token)},
+    )
+
+
+def _extract_topics(doc: Doc, entities: list[str]) -> list[str]:
+    topics: list[str] = []
+    topics.extend(entities)
+    for token in doc:
+        if token.is_space or token.is_stop:
+            continue
+        if token.pos_ not in TOPIC_POS:
+            continue
+        candidate = _normalize_token(token)
+        if len(candidate) < 2:
+            continue
+        topics.append(candidate)
+    return _unique_preserve(topics)[:6]
+
+
+def _extract_keywords(doc: Doc, entities: list[str]) -> list[str]:
+    keywords: list[str] = []
+    keywords.extend(entities)
+    for token in doc:
+        if token.is_space or token.is_stop:
+            continue
+        if token.pos_ not in TARGET_POS:
+            continue
+        candidate = _normalize_token(token)
+        if len(candidate) < 2:
+            continue
+        keywords.append(candidate)
+    return _unique_preserve(keywords)[:10]
+
+
+def _normalize_token(token: Token) -> str:
+    """Prefer lemmas when available while preserving useful proper nouns."""
+    if token.pos_ == "PROPN":
+        return token.text
+    lemma = token.lemma_.strip()
+    if lemma and lemma != "*":
+        return lemma
+    return token.text
 
 
 def _unique_preserve(items: list[str]) -> list[str]:
@@ -98,36 +197,57 @@ def _unique_preserve(items: list[str]) -> list[str]:
     return result
 
 
-def _extract_keywords(tokens: list[str]) -> list[str]:
-    return [token for token in tokens if len(token) >= 2][:8]
-
-
-def _infer_memory_types(text: str) -> list[str]:
+def _infer_memory_types(text: str, parsed: ParsedText) -> list[str]:
     found: list[str] = []
-    for memory_type, terms in MEMORY_TYPE_RULES.items():
-        if any(term in text for term in terms):
+    normalized_text = text.strip()
+    lemma_set = set(parsed.keywords) | set(parsed.topics) | set(parsed.lemmas)
+
+    for memory_type, terms in TEXT_MEMORY_TYPE_RULES.items():
+        if any(
+            term in normalized_text
+            and not _is_negated_surface_match(term, parsed)
+            for term in terms
+        ):
             found.append(memory_type)
+
+    for memory_type, lemmas in LEMMA_MEMORY_TYPE_RULES.items():
+        if any(lemma in lemma_set and lemma not in parsed.negated_lemmas for lemma in lemmas):
+            found.append(memory_type)
+
     if not found:
         found.append("context")
-    return found
+    return _unique_preserve(found)
 
 
-def _infer_emotion(text: str) -> dict[str, object]:
+def _infer_emotion(text: str, parsed: ParsedText) -> dict[str, object]:
     matched: list[str] = []
-    for emotion, terms in EMOTION_KEYWORDS.items():
-        if any(term in text for term in terms):
+    for emotion, terms in TEXT_EMOTION_RULES.items():
+        if any(
+            term in text and not _is_negated_surface_match(term, parsed)
+            for term in terms
+        ):
             matched.append(emotion)
+
+    lemma_set = set(parsed.keywords) | set(parsed.topics) | set(parsed.lemmas)
+    for emotion, lemmas in LEMMA_EMOTION_RULES.items():
+        if any(lemma in lemma_set and lemma not in parsed.negated_lemmas for lemma in lemmas):
+            matched.append(emotion)
+
+    matched = _unique_preserve(matched)
     primary = matched[0] if matched else "neutral"
-    intensity = min(1.0, 0.2 + 0.15 * len(matched))
+    intensity = min(1.0, 0.2 + 0.12 * len(matched))
     if "!" in text or "？" in text or "?" in text:
         intensity = min(1.0, intensity + 0.1)
+    if parsed.negated_lemmas and primary != "neutral":
+        intensity = max(0.2, intensity - 0.05)
+    confidence = 0.60 if matched else 0.35
     return {
         "primary": primary,
         "secondary": matched[1:3],
         "valence": _emotion_valence(primary),
         "arousal": round(intensity, 2),
         "intensity": round(intensity, 2),
-        "confidence": 0.55 if matched else 0.35,
+        "confidence": confidence,
     }
 
 
@@ -141,8 +261,8 @@ def _emotion_valence(primary: str) -> float:
 
 def _collect_reason_codes(
     text: str,
+    parsed: ParsedText,
     memory_types: list[str],
-    topics: list[str],
     emotion: dict[str, object],
 ) -> list[str]:
     """Collect human-readable reason codes for why a memory matters."""
@@ -170,17 +290,26 @@ def _collect_reason_codes(
         reasons.append("has_sensitive_topic")
     if any(marker in text for marker in TECHNICAL_MARKERS):
         reasons.append("has_technical_marker")
-    if len(topics) >= 3:
+    if len(parsed.topics) >= 3:
         reasons.append("has_rich_topics")
+    if parsed.entities:
+        reasons.append("has_named_entity")
+    if parsed.negated_lemmas:
+        reasons.append("has_negation")
     if _is_short_ack(text):
         reasons.append("is_short_ack")
-    if len(text) <= 12 and len(topics) <= 1:
+    if len(text) <= 12 and len(parsed.topics) <= 1:
         reasons.append("is_low_information")
 
     return _unique_preserve(reasons)
 
 
-def _score_text(text: str, memory_types: list[str], topics: list[str], emotion: dict[str, object]) -> dict[str, float]:
+def _score_text(
+    text: str,
+    parsed: ParsedText,
+    memory_types: list[str],
+    emotion: dict[str, object],
+) -> dict[str, float]:
     persistence = 0.35
     retrieval = 0.25
     affective = 0.2
@@ -213,11 +342,16 @@ def _score_text(text: str, memory_types: list[str], topics: list[str], emotion: 
     if emotion["primary"] != "neutral":
         affective += 0.35
         persistence += 0.1
-    if len(topics) >= 3:
+    if len(parsed.topics) >= 3:
         indexability += 0.2
+    if parsed.entities:
+        indexability += 0.15
+        practical += 0.05
     if any(marker in text for marker in TECHNICAL_MARKERS):
         practical += 0.15
         indexability += 0.15
+    if parsed.negated_lemmas:
+        affective = max(0.05, affective - 0.08)
 
     return {
         "persistence_value": round(min(1.0, persistence), 2),
@@ -250,6 +384,8 @@ def _score_save_strength(scores: dict[str, float], reason_codes: list[str]) -> f
         strength += 0.05
     if "has_future_reference" in reason_codes:
         strength += 0.04
+    if "has_named_entity" in reason_codes:
+        strength += 0.04
     if "is_short_ack" in reason_codes:
         strength -= 0.18
     if "is_low_information" in reason_codes:
@@ -275,6 +411,23 @@ def _is_short_ack(text: str) -> bool:
     """Detect short acknowledgements that should remain low-priority memories."""
     cleaned = text.strip()
     return cleaned in SHORT_ACK_TERMS
+
+
+def _is_negated_surface_match(term: str, parsed: ParsedText) -> bool:
+    """Return True when a surface rule should be softened by negation."""
+    return term in parsed.negated_terms or term in parsed.negated_lemmas
+
+
+def _is_negated(token: Token) -> bool:
+    """Return True when a token is modified by a negation marker."""
+    if token.lemma_ in NEGATION_LEMMAS:
+        return True
+    if token.head is not token and token.head.lemma_ in NEGATION_LEMMAS:
+        return True
+    for child in token.children:
+        if child.lemma_ in NEGATION_LEMMAS or child.dep_ == "neg":
+            return True
+    return False
 
 
 def _build_recall_policy(text: str, scores: dict[str, float]) -> dict[str, object]:
@@ -312,11 +465,16 @@ def _build_safety(text: str) -> dict[str, object]:
     }
 
 
-def _build_facets(text: str, memory_types: list[str], emotion: dict[str, object], topics: list[str]) -> dict[str, dict[str, object]]:
+def _build_facets(
+    text: str,
+    parsed: ParsedText,
+    memory_types: list[str],
+    emotion: dict[str, object],
+) -> dict[str, dict[str, object]]:
     return {
         "practical": {
             "goal": "会話文脈で役立つ情報として残す",
-            "constraints": ["簡易ルールベース解析"],
+            "constraints": ["GiNZA + 簡易ルールベース解析"],
         },
         "emotional": {
             "need": "感情を伴う記憶として扱う" if emotion["primary"] != "neutral" else None,
@@ -324,10 +482,13 @@ def _build_facets(text: str, memory_types: list[str], emotion: dict[str, object]
         },
         "identity": {
             "values": [memory_type for memory_type in memory_types if memory_type in {"preference", "desire", "reflection"}],
-            "self_view": topics[:2],
+            "self_view": parsed.topics[:2],
         },
         "relationship": {
-            "people": [topic for topic in topics if topic in {"友達", "家族", "母", "父", "恋人"}],
+            "people": [
+                topic for topic in parsed.entities + parsed.topics
+                if topic in {"友達", "家族", "母", "父", "恋人"}
+            ],
             "relation_context": "personal" if "relationship" in memory_types else None,
         },
         "task": {
