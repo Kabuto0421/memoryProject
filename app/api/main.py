@@ -40,4 +40,9 @@ def get_memories(limit: int = 20) -> dict[str, object]:
 def post_memory(request: MemoryCreateRequest) -> dict[str, object]:
     """Create a new memory from raw conversational text."""
     memory = create_memory(request.raw_text)
-    return {"memory": memory}
+    return {
+        "memory": memory,
+        "save_strength": memory["save_strength"],
+        "memory_priority": memory["memory_priority"],
+        "reason_codes": memory["reason_codes"],
+    }

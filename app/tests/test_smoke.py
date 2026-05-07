@@ -3,7 +3,6 @@
 from fastapi.testclient import TestClient
 
 from app.api.main import app, healthcheck
-from app.core.settings import DB_PATH
 from app.memory.store import create_memory, init_db, list_memories
 
 
@@ -24,6 +23,20 @@ def test_create_and_list_memory_with_temp_db(tmp_path) -> None:
     assert memories[0]["raw_text"] == "本屋でAIに本を選んでほしいと感じた。"
     assert "desire" in memories[0]["memory_types"] or "decision_support" in memories[0]["memory_types"]
     assert "emotion" in memories[0]
+    assert "save_strength" in memories[0]
+    assert memories[0]["memory_priority"] in {"low", "medium", "high", "critical"}
+    assert isinstance(memories[0]["reason_codes"], list)
+
+
+def test_short_ack_is_low_priority_but_still_saved(tmp_path) -> None:
+    """Short acknowledgements should remain stored but at low priority."""
+    db_path = str(tmp_path / "ack_memories.db")
+    init_db(db_path)
+
+    created = create_memory("ありがとう", db_path=db_path)
+
+    assert created["memory_priority"] == "low"
+    assert "is_short_ack" in created["reason_codes"]
 
 
 def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
@@ -40,3 +53,5 @@ def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
     assert create_response.status_code == 200
     assert list_response.status_code == 200
     assert list_response.json()["count"] >= 1
+    assert "save_strength" in create_response.json()
+    assert "reason_codes" in create_response.json()

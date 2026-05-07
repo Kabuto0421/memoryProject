@@ -29,6 +29,7 @@ MEMORY_TYPE_RULES = {
 FUTURE_TERMS = ["明日", "来週", "あとで", "次回", "今度", "締切"]
 SENSITIVE_TERMS = ["病気", "トラウマ", "家族", "お金", "秘密", "恋人"]
 TECHNICAL_MARKERS = [".py", ".md", "http://", "https://", "/", "SQLite", "FastAPI", "Streamlit"]
+SHORT_ACK_TERMS = ["ありがとう", "了解", "OK", "なるほど", "たしかに", "うん", "そうだね"]
 
 
 @dataclass(slots=True)
@@ -44,6 +45,9 @@ class AnalysisResult:
     emotion: dict[str, object]
     recall_policy: dict[str, object]
     safety: dict[str, object]
+    save_strength: float
+    memory_priority: str
+    reason_codes: list[str]
 
     def to_dict(self) -> dict[str, object]:
         """Convert the result into a plain JSON-serializable dictionary."""
@@ -61,6 +65,9 @@ def analyze_text(text: str) -> AnalysisResult:
     memory_types = _infer_memory_types(cleaned)
     emotion = _infer_emotion(cleaned)
     scores = _score_text(cleaned, memory_types, topics, emotion)
+    reason_codes = _collect_reason_codes(cleaned, memory_types, topics, emotion)
+    save_strength = _score_save_strength(scores, reason_codes)
+    memory_priority = _memory_priority(save_strength)
     recall_policy = _build_recall_policy(cleaned, scores)
     safety = _build_safety(cleaned)
     facets = _build_facets(cleaned, memory_types, emotion, topics)
@@ -74,6 +81,9 @@ def analyze_text(text: str) -> AnalysisResult:
         emotion=emotion,
         recall_policy=recall_policy,
         safety=safety,
+        save_strength=save_strength,
+        memory_priority=memory_priority,
+        reason_codes=reason_codes,
     )
 
 
@@ -129,6 +139,47 @@ def _emotion_valence(primary: str) -> float:
     return 0.0
 
 
+def _collect_reason_codes(
+    text: str,
+    memory_types: list[str],
+    topics: list[str],
+    emotion: dict[str, object],
+) -> list[str]:
+    """Collect human-readable reason codes for why a memory matters."""
+    reasons: list[str] = []
+    mapping = {
+        "preference": "has_preference",
+        "desire": "has_desire",
+        "worry": "has_worry",
+        "reflection": "has_reflection",
+        "relationship": "has_relationship",
+        "decision_support": "has_decision_support",
+        "task": "has_task_signal",
+        "context": "is_context_only",
+    }
+    for memory_type in memory_types:
+        code = mapping.get(memory_type)
+        if code:
+            reasons.append(code)
+
+    if any(term in text for term in FUTURE_TERMS):
+        reasons.append("has_future_reference")
+    if emotion["primary"] != "neutral":
+        reasons.append("has_emotion_signal")
+    if any(term in text for term in SENSITIVE_TERMS):
+        reasons.append("has_sensitive_topic")
+    if any(marker in text for marker in TECHNICAL_MARKERS):
+        reasons.append("has_technical_marker")
+    if len(topics) >= 3:
+        reasons.append("has_rich_topics")
+    if _is_short_ack(text):
+        reasons.append("is_short_ack")
+    if len(text) <= 12 and len(topics) <= 1:
+        reasons.append("is_low_information")
+
+    return _unique_preserve(reasons)
+
+
 def _score_text(text: str, memory_types: list[str], topics: list[str], emotion: dict[str, object]) -> dict[str, float]:
     persistence = 0.35
     retrieval = 0.25
@@ -179,6 +230,51 @@ def _score_text(text: str, memory_types: list[str], topics: list[str], emotion: 
         "decision_value": round(min(1.0, decision), 2),
         "indexability_value": round(min(1.0, indexability), 2),
     }
+
+
+def _score_save_strength(scores: dict[str, float], reason_codes: list[str]) -> float:
+    """Compute a unified save strength while keeping all memories stored."""
+    strength = (
+        0.30 * scores["persistence_value"]
+        + 0.20 * scores["affective_value"]
+        + 0.15 * scores["identity_value"]
+        + 0.10 * scores["relationship_value"]
+        + 0.10 * scores["practical_value"]
+        + 0.10 * scores["task_value"]
+        + 0.05 * scores["retrieval_value"]
+    )
+
+    if "has_sensitive_topic" in reason_codes:
+        strength += 0.05
+    if "has_decision_support" in reason_codes:
+        strength += 0.05
+    if "has_future_reference" in reason_codes:
+        strength += 0.04
+    if "is_short_ack" in reason_codes:
+        strength -= 0.18
+    if "is_low_information" in reason_codes:
+        strength -= 0.10
+    if reason_codes == ["is_context_only"]:
+        strength -= 0.08
+
+    return round(max(0.0, min(1.0, strength)), 2)
+
+
+def _memory_priority(save_strength: float) -> str:
+    """Bucket save strength into a simple priority label."""
+    if save_strength >= 0.80:
+        return "critical"
+    if save_strength >= 0.55:
+        return "high"
+    if save_strength >= 0.30:
+        return "medium"
+    return "low"
+
+
+def _is_short_ack(text: str) -> bool:
+    """Detect short acknowledgements that should remain low-priority memories."""
+    cleaned = text.strip()
+    return cleaned in SHORT_ACK_TERMS
 
 
 def _build_recall_policy(text: str, scores: dict[str, float]) -> dict[str, object]:

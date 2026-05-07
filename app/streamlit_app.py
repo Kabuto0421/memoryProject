@@ -30,6 +30,11 @@ if submitted:
     if raw_text.strip():
         memory = create_memory(raw_text)
         st.success(f"保存した: {memory['id']}")
+        st.info(
+            f"save_strength={memory['save_strength']} | "
+            f"priority={memory['memory_priority']} | "
+            f"reasons={', '.join(memory['reason_codes'])}"
+        )
     else:
         st.warning("空の文章は保存できない。")
 
@@ -41,12 +46,15 @@ for memory in list_memories(limit=20):
         st.caption(
             f"types={', '.join(memory['memory_types'])} | "
             f"emotion={memory['emotion']['primary']} | "
+            f"priority={memory['memory_priority']} | "
+            f"save_strength={memory['save_strength']} | "
             f"created_at={memory['created_at']}"
         )
         st.json(
             {
                 "topics": memory["topics"],
                 "scores": memory["scores"],
+                "reason_codes": memory["reason_codes"],
                 "recall_policy": memory["recall_policy"],
             },
             expanded=False,

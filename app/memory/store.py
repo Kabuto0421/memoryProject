@@ -43,11 +43,23 @@ def init_db(db_path: str | None = None) -> None:
                 emotion_json TEXT NOT NULL,
                 recall_policy_json TEXT NOT NULL,
                 safety_json TEXT NOT NULL,
+                save_strength REAL NOT NULL DEFAULT 0,
+                memory_priority TEXT NOT NULL DEFAULT 'low',
+                reason_codes_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT
             )
             """
         )
+        existing_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "save_strength" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN save_strength REAL NOT NULL DEFAULT 0")
+        if "memory_priority" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN memory_priority TEXT NOT NULL DEFAULT 'low'")
+        if "reason_codes_json" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN reason_codes_json TEXT NOT NULL DEFAULT '[]'")
 
 
 def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
@@ -70,6 +82,9 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
         "emotion": analysis.emotion,
         "recall_policy": analysis.recall_policy,
         "safety": analysis.safety,
+        "save_strength": analysis.save_strength,
+        "memory_priority": analysis.memory_priority,
+        "reason_codes": analysis.reason_codes,
         "created_at": utc_now_iso(),
         "updated_at": None,
     }
@@ -79,8 +94,8 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
             INSERT INTO memories (
                 id, raw_text, summary, memory_types_json, topics_json, keywords_json,
                 facets_json, scores_json, emotion_json, recall_policy_json, safety_json,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                save_strength, memory_priority, reason_codes_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory["id"],
@@ -94,6 +109,9 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
                 _dump_json(memory["emotion"]),
                 _dump_json(memory["recall_policy"]),
                 _dump_json(memory["safety"]),
+                memory["save_strength"],
+                memory["memory_priority"],
+                _dump_json(memory["reason_codes"]),
                 memory["created_at"],
                 memory["updated_at"],
             ),
@@ -138,6 +156,9 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
         "emotion": _load_json(row["emotion_json"]),
         "recall_policy": _load_json(row["recall_policy_json"]),
         "safety": _load_json(row["safety_json"]),
+        "save_strength": row["save_strength"],
+        "memory_priority": row["memory_priority"],
+        "reason_codes": _load_json(row["reason_codes_json"]),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
