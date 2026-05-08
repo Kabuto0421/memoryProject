@@ -6,7 +6,15 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages, list_shared_contexts
+from app.memory.store import (
+    create_memory,
+    create_message,
+    init_db,
+    list_memories,
+    list_messages,
+    list_relevant_context,
+    list_shared_contexts,
+)
 
 
 @asynccontextmanager
@@ -73,6 +81,31 @@ def get_shared_contexts(limit: int = 20) -> dict[str, object]:
     """List shared contexts derived from accepted conversation turns."""
     shared_contexts = list_shared_contexts(limit=limit)
     return {"count": len(shared_contexts), "shared_contexts": shared_contexts}
+
+
+@app.get("/context/relevant")
+def get_relevant_context(
+    query: str,
+    limit: int = 8,
+    speaker: Literal["user", "assistant"] | None = None,
+    memory_priority: Literal["low", "medium", "high", "critical"] | None = None,
+    memory_scope: Literal["user_memory", "assistant_trace", "shared_context_candidate"] | None = None,
+) -> dict[str, object]:
+    """Return a compact relevant context bundle for the next conversation turn."""
+    result = list_relevant_context(
+        query,
+        limit=limit,
+        speaker=speaker,
+        memory_priority=memory_priority,
+        memory_scope=memory_scope,
+    )
+    return {
+        "query": query,
+        "shared_context_count": len(result["shared_contexts"]),
+        "memory_count": len(result["memories"]),
+        "shared_contexts": result["shared_contexts"],
+        "memories": result["memories"],
+    }
 
 
 @app.post("/memories")

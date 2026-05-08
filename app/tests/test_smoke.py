@@ -4,7 +4,15 @@ from fastapi.testclient import TestClient
 
 from app.analysis.text_analyzer import analyze_text
 from app.api.main import app, healthcheck
-from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages, list_shared_contexts
+from app.memory.store import (
+    create_memory,
+    create_message,
+    init_db,
+    list_memories,
+    list_messages,
+    list_relevant_context,
+    list_shared_contexts,
+)
 
 
 def test_healthcheck_returns_ok() -> None:
@@ -138,6 +146,52 @@ def test_shared_context_is_created_from_accepted_flow(tmp_path) -> None:
     assert contexts[0]["summary"].startswith("今後はこの方針")
     assert contexts[0]["source_turn_ids"] == ["turn_ctx_proposal_1", "turn_ctx_accept_1"]
     assert "shared_context_candidate" in contexts[0]["tags"]
+
+
+def test_relevant_context_prioritizes_shared_contexts(tmp_path) -> None:
+    """Relevant context lookup should surface accepted shared context first."""
+    db_path = str(tmp_path / "relevant_context.db")
+    init_db(db_path)
+
+    create_message(
+        "保存方針としては全件保存で進めるのがよい。",
+        db_path=db_path,
+        turn_id="turn_rel_proposal_1",
+        speaker="assistant",
+    )
+    create_message(
+        "その方針で。",
+        db_path=db_path,
+        turn_id="turn_rel_accept_1",
+        reply_to_turn_id="turn_rel_proposal_1",
+        speaker="user",
+    )
+    create_message(
+        "保存方針の説明をREADMEにも入れておきたい。",
+        db_path=db_path,
+        turn_id="turn_rel_user_1",
+        speaker="user",
+    )
+
+    result = list_relevant_context("保存方針", db_path=db_path)
+
+    assert result["shared_contexts"]
+    assert result["shared_contexts"][0]["id"] == "ctx_turn_rel_proposal_1"
+    assert result["memories"]
+    assert any(memory["turn_id"] == "turn_rel_user_1" for memory in result["memories"])
+
+
+def test_relevant_context_suppresses_sensitive_casual_matches(tmp_path) -> None:
+    """Sensitive memories should not surface on weak casual matches."""
+    db_path = str(tmp_path / "relevant_sensitive.db")
+    init_db(db_path)
+
+    create_memory("家族の病気のことで本当に不安だ。", db_path=db_path)
+    create_memory("保存方針を整理したい。", db_path=db_path)
+
+    result = list_relevant_context("保存", db_path=db_path)
+
+    assert all(memory["safety"]["sensitivity"] == "normal" for memory in result["memories"])
 
 
 def test_ginza_extracts_lemma_based_reflection_and_keywords() -> None:
@@ -327,3 +381,47 @@ def test_api_lists_shared_contexts(monkeypatch, tmp_path) -> None:
     assert shared_response.status_code == 200
     assert shared_response.json()["count"] == 1
     assert shared_response.json()["shared_contexts"][0]["id"] == "ctx_turn_api_ctx_proposal"
+
+
+def test_api_returns_relevant_context(monkeypatch, tmp_path) -> None:
+    """The relevant context API should return shared contexts and matching memories."""
+    db_path = str(tmp_path / "api_relevant_context.db")
+    monkeypatch.setattr("app.memory.store.DB_PATH", tmp_path / "api_relevant_context.db")
+    monkeypatch.setattr("app.core.settings.DB_PATH", tmp_path / "api_relevant_context.db")
+    init_db(db_path)
+
+    client = TestClient(app)
+    client.post(
+        "/messages",
+        json={
+            "text": "保存方針としては全件保存で進めるのがよい。",
+            "speaker": "assistant",
+            "turn_id": "turn_api_rel_proposal",
+        },
+    )
+    client.post(
+        "/messages",
+        json={
+            "text": "それでお願い。",
+            "speaker": "user",
+            "turn_id": "turn_api_rel_accept",
+            "reply_to_turn_id": "turn_api_rel_proposal",
+        },
+    )
+    client.post(
+        "/messages",
+        json={
+            "text": "保存方針の説明を README にも入れておきたい。",
+            "speaker": "user",
+            "turn_id": "turn_api_rel_user",
+        },
+    )
+
+    response = client.get("/context/relevant", params={"query": "保存方針"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["shared_context_count"] >= 1
+    assert payload["memory_count"] >= 1
+    assert payload["shared_contexts"][0]["id"] == "ctx_turn_api_rel_proposal"
+    assert any(memory["turn_id"] == "turn_api_rel_user" for memory in payload["memories"])

@@ -27,6 +27,7 @@ USER_ACCEPTANCE_TERMS = {
     "その方針で",
     "じゃあそれで",
 }
+PRIORITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def utc_now_iso() -> str:
@@ -309,6 +310,35 @@ def list_shared_contexts(limit: int = 50, db_path: str | None = None) -> list[di
     return [_row_to_shared_context(row) for row in rows]
 
 
+def list_relevant_context(
+    query: str,
+    *,
+    limit: int = 8,
+    speaker: str | None = None,
+    memory_priority: str | None = None,
+    memory_scope: str | None = None,
+    db_path: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a compact relevant context bundle for the given query."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("query must not be empty.")
+
+    shared_contexts = _find_relevant_shared_contexts(normalized_query, limit=limit, db_path=db_path)
+    memories = _find_relevant_memories(
+        normalized_query,
+        limit=limit,
+        speaker=speaker,
+        memory_priority=memory_priority,
+        memory_scope=memory_scope,
+        db_path=db_path,
+    )
+    return {
+        "shared_contexts": shared_contexts[:limit],
+        "memories": memories[:limit],
+    }
+
+
 def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -357,6 +387,131 @@ def _row_to_shared_context(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _find_relevant_shared_contexts(
+    query: str,
+    *,
+    limit: int,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM shared_contexts
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    contexts = [_row_to_shared_context(row) for row in rows]
+    ranked = [
+        (context, _score_shared_context_match(query, context))
+        for context in contexts
+    ]
+    ranked = [item for item in ranked if item[1] > 0]
+    ranked.sort(
+        key=lambda item: (
+            item[1],
+            item[0]["importance"],
+            item[0]["created_at"],
+        ),
+        reverse=True,
+    )
+    return [item[0] for item in ranked[:limit]]
+
+
+def _find_relevant_memories(
+    query: str,
+    *,
+    limit: int,
+    speaker: str | None,
+    memory_priority: str | None,
+    memory_scope: str | None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    memories = list_memories(
+        limit=200,
+        db_path=db_path,
+        speaker=speaker,
+        memory_scope=memory_scope,
+    )
+    ranked: list[tuple[dict[str, Any], int]] = []
+    for memory in memories:
+        if memory_priority and memory["memory_priority"] != memory_priority:
+            continue
+        score = _score_memory_match(query, memory)
+        if score <= 0:
+            continue
+        if _should_suppress_sensitive_memory(query, memory, score):
+            continue
+        ranked.append((memory, score))
+
+    ranked.sort(
+        key=lambda item: (
+            item[1],
+            PRIORITY_ORDER.get(item[0]["memory_priority"], 0),
+            item[0]["save_strength"],
+            item[0]["created_at"],
+        ),
+        reverse=True,
+    )
+    return [item[0] for item in ranked[:limit]]
+
+
+def _score_shared_context_match(query: str, context: dict[str, Any]) -> int:
+    haystacks = [
+        context["summary"],
+        context["detail"],
+        *context["tags"],
+    ]
+    return _match_score(query, haystacks)
+
+
+def _score_memory_match(query: str, memory: dict[str, Any]) -> int:
+    haystacks = [
+        memory["raw_text"],
+        memory["summary"],
+        *memory["topics"],
+        *memory["keywords"],
+        *memory["entities"],
+        *memory["reason_codes"],
+    ]
+    return _match_score(query, haystacks)
+
+
+def _match_score(query: str, haystacks: list[str]) -> int:
+    query_terms = _query_terms(query)
+    score = 0
+    for term in query_terms:
+        for haystack in haystacks:
+            if term and term in haystack.lower():
+                score += 1
+                break
+    return score
+
+
+def _query_terms(query: str) -> list[str]:
+    normalized = query.lower().strip()
+    terms = [part for part in normalized.replace("　", " ").split() if part]
+    if not terms:
+        return [normalized]
+    if normalized not in terms:
+        terms.append(normalized)
+    return _unique_strings(terms)
+
+
+def _should_suppress_sensitive_memory(query: str, memory: dict[str, Any], score: int) -> bool:
+    if memory["safety"]["sensitivity"] != "sensitive":
+        return False
+    if score >= 2:
+        return False
+    query_terms = set(_query_terms(query))
+    memory_terms = {
+        *[item.lower() for item in memory["topics"]],
+        *[item.lower() for item in memory["keywords"]],
+        *[item.lower() for item in memory["entities"]],
+    }
+    return query_terms.isdisjoint(memory_terms)
 
 
 def _default_memory_scope(speaker: str) -> str:
