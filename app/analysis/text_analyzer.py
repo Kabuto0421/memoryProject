@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from functools import lru_cache
 
 import spacy
+from ginza import bunsetu_span
 from spacy.tokens import Doc, Token
 
 
@@ -27,8 +28,8 @@ LEMMA_EMOTION_RULES = {
 
 TEXT_MEMORY_TYPE_RULES = {
     "preference": ["好き", "嫌い", "苦手", "避けたい"],
-    "desire": ["したい", "ほしい", "欲しい"],
-    "worry": ["不安", "心配", "困る", "怖い"],
+    "desire": ["ほしい", "欲しい"],
+    "worry": ["不安", "心配", "困る", "怖い", "落ち着かない"],
     "reflection": ["思う", "感じる", "気がする", "おかしくないか", "違和感"],
     "relationship": ["友達", "家族", "母", "父", "恋人", "先輩", "後輩"],
     "decision_support": ["決めてほしい", "選んでほしい", "どれ", "迷う"],
@@ -38,7 +39,7 @@ TEXT_MEMORY_TYPE_RULES = {
 LEMMA_MEMORY_TYPE_RULES = {
     "preference": {"好き", "嫌い", "苦手", "好む", "避ける"},
     "desire": {"望む"},
-    "worry": {"不安", "心配", "困る", "怖い"},
+    "worry": {"不安", "心配", "困る", "怖い", "悩む"},
     "reflection": {"思う", "感じる", "感ずる", "違和感"},
     "relationship": {"友達", "家族", "母", "父", "恋人", "先輩", "後輩"},
     "decision_support": {"決める", "迷う"},
@@ -54,6 +55,50 @@ TOPIC_POS = {"NOUN", "PROPN"}
 NEGATION_LEMMAS = {"ない", "ぬ", "ず"}
 SOFT_NEGATION_CHILD_LEMMAS = {"よう", "ため"}
 NEGATION_TARGET_DEPS = {"nsubj", "obj", "iobj", "obl", "advmod", "amod", "ccomp", "xcomp"}
+SOFT_NEGATION_PHRASES = ("じゃなくて", "ではなくて", "だけじゃなくて")
+NON_SALIENT_ENTITY_LABELS = {"Time", "Animal_Part", "N_Product", "N_Person", "Show_Organization"}
+SIGNAL_NEGATION_TARGET_LEMMAS = {
+    "好き",
+    "嫌い",
+    "苦手",
+    "好む",
+    "避ける",
+    "不安",
+    "心配",
+    "困る",
+    "怖い",
+    "思う",
+    "感じる",
+    "感ずる",
+    "違和感",
+}
+HABIT_INTENT_PHRASES = (
+    "習慣にしたい",
+    "流れにしたい",
+    "形にしたい",
+    "形にしておきたい",
+    "方法にしたい",
+    "方法にしておきたい",
+    "ようにしたい",
+    "ようにしておきたい",
+)
+HABIT_INTENT_TOPIC_MARKERS = {"習慣", "流れ", "形"}
+EXECUTION_INTENT_TARGET_LEMMAS = {
+    "分ける",
+    "更新",
+    "見直す",
+    "整理",
+    "残す",
+    "扱う",
+    "言う",
+    "話す",
+    "進める",
+    "決める",
+    "連絡",
+    "記録",
+    "入れる",
+    "する",
+}
 
 
 @dataclass(slots=True)
@@ -65,8 +110,11 @@ class ParsedText:
     topics: list[str]
     keywords: list[str]
     entities: list[str]
+    salient_entities: list[str]
+    desire_target_lemmas: list[str]
     negated_lemmas: set[str]
     negated_terms: set[str]
+    has_meaningful_negation: bool
 
 
 @dataclass(slots=True)
@@ -135,6 +183,7 @@ def _parse_text(text: str) -> ParsedText:
     tokens = [token.text for token in doc if not token.is_space]
     lemmas = [token.lemma_ for token in doc if not token.is_space]
     entities = _unique_preserve([ent.text for ent in doc.ents if ent.text.strip()])
+    salient_entities = _extract_salient_entities(doc)
     topics = _extract_topics(doc, entities)
     keywords = _extract_keywords(doc, entities)
     return ParsedText(
@@ -143,8 +192,11 @@ def _parse_text(text: str) -> ParsedText:
         topics=topics,
         keywords=keywords,
         entities=entities,
+        salient_entities=salient_entities,
+        desire_target_lemmas=_extract_desire_targets(doc),
         negated_lemmas={token.lemma_ for token in doc if _is_negated(token)},
         negated_terms={token.text for token in doc if _is_negated(token)},
+        has_meaningful_negation=any(_is_meaningful_negation_cue(token) for token in doc),
     )
 
 
@@ -178,6 +230,33 @@ def _extract_keywords(doc: Doc, entities: list[str]) -> list[str]:
     return _unique_preserve(keywords)[:10]
 
 
+def _extract_salient_entities(doc: Doc) -> list[str]:
+    """Return only entities that should influence memory strength."""
+    salient: list[str] = []
+    for ent in doc.ents:
+        if not ent.text.strip():
+            continue
+        if ent.label_ in NON_SALIENT_ENTITY_LABELS:
+            continue
+        salient.append(ent.text)
+    return _unique_preserve(salient)
+
+
+def _extract_desire_targets(doc: Doc) -> list[str]:
+    """Collect content predicates governed by the desiderative auxiliary 「たい」."""
+    targets: list[str] = []
+    for token in doc:
+        if token.lemma_ != "たい":
+            continue
+        head = token.head
+        while head is not head.head and head.pos_ == "AUX":
+            head = head.head
+        candidate = _normalize_token(head)
+        if candidate and candidate != "*":
+            targets.append(candidate)
+    return _unique_preserve(targets)
+
+
 def _normalize_token(token: Token) -> str:
     """Prefer lemmas when available while preserving useful proper nouns."""
     if token.pos_ == "PROPN":
@@ -203,6 +282,7 @@ def _infer_memory_types(text: str, parsed: ParsedText) -> list[str]:
     found: list[str] = []
     normalized_text = text.strip()
     lemma_set = set(parsed.keywords) | set(parsed.topics) | set(parsed.lemmas)
+    desire_mode = _classify_desiderative_mode(normalized_text, parsed)
 
     for memory_type, terms in TEXT_MEMORY_TYPE_RULES.items():
         if any(
@@ -216,9 +296,37 @@ def _infer_memory_types(text: str, parsed: ParsedText) -> list[str]:
         if any(lemma in lemma_set and lemma not in parsed.negated_lemmas for lemma in lemmas):
             found.append(memory_type)
 
+    if desire_mode == "plain_desire":
+        found.append("desire")
+    elif desire_mode in {"execution_intent", "habit_intent"}:
+        found.append("task")
+        if desire_mode == "habit_intent":
+            found.append("reflection")
+
     if not found:
         found.append("context")
     return _unique_preserve(found)
+
+
+def _classify_desiderative_mode(text: str, parsed: ParsedText) -> str | None:
+    """Classify 「たい」 into plain desire vs. intention-like usages."""
+    if "たい" not in parsed.lemmas:
+        return None
+
+    if any(phrase in text for phrase in HABIT_INTENT_PHRASES):
+        return "habit_intent"
+
+    topic_set = set(parsed.topics) | set(parsed.keywords)
+    if topic_set & HABIT_INTENT_TOPIC_MARKERS:
+        return "habit_intent"
+
+    if "ておきたい" in text or "ておきた" in text:
+        return "execution_intent"
+
+    if any(target in EXECUTION_INTENT_TARGET_LEMMAS for target in parsed.desire_target_lemmas):
+        return "execution_intent"
+
+    return "plain_desire"
 
 
 def _infer_emotion(text: str, parsed: ParsedText) -> dict[str, object]:
@@ -240,7 +348,7 @@ def _infer_emotion(text: str, parsed: ParsedText) -> dict[str, object]:
     intensity = min(1.0, 0.2 + 0.12 * len(matched))
     if "!" in text or "？" in text or "?" in text:
         intensity = min(1.0, intensity + 0.1)
-    if parsed.negated_lemmas and primary != "neutral":
+    if parsed.has_meaningful_negation and primary != "neutral":
         intensity = max(0.2, intensity - 0.05)
     confidence = 0.60 if matched else 0.35
     return {
@@ -269,6 +377,7 @@ def _collect_reason_codes(
 ) -> list[str]:
     """Collect human-readable reason codes for why a memory matters."""
     reasons: list[str] = []
+    desire_mode = _classify_desiderative_mode(text, parsed)
     mapping = {
         "preference": "has_preference",
         "desire": "has_desire",
@@ -284,6 +393,11 @@ def _collect_reason_codes(
         if code:
             reasons.append(code)
 
+    if desire_mode == "execution_intent":
+        reasons.append("has_execution_intent")
+    elif desire_mode == "habit_intent":
+        reasons.append("has_habit_intent")
+
     if any(term in text for term in FUTURE_TERMS):
         reasons.append("has_future_reference")
     if emotion["primary"] != "neutral":
@@ -294,9 +408,9 @@ def _collect_reason_codes(
         reasons.append("has_technical_marker")
     if _has_rich_topics(parsed):
         reasons.append("has_rich_topics")
-    if parsed.entities:
+    if parsed.salient_entities:
         reasons.append("has_named_entity")
-    if parsed.negated_lemmas:
+    if parsed.has_meaningful_negation:
         reasons.append("has_negation")
     if _is_short_ack(text):
         reasons.append("is_short_ack")
@@ -346,13 +460,13 @@ def _score_text(
         persistence += 0.1
     if _has_rich_topics(parsed):
         indexability += 0.2
-    if parsed.entities:
+    if parsed.salient_entities:
         indexability += 0.15
         practical += 0.05
     if any(marker in text for marker in TECHNICAL_MARKERS):
         practical += 0.15
         indexability += 0.15
-    if parsed.negated_lemmas:
+    if parsed.has_meaningful_negation:
         affective = max(0.05, affective - 0.08)
 
     return {
@@ -450,6 +564,58 @@ def _is_negated(token: Token) -> bool:
     if any(child.lemma_ in NEGATION_LEMMAS or child.dep_ == "neg" for child in token.head.children):
         return True
     return False
+
+
+def _is_meaningful_negation_cue(token: Token) -> bool:
+    """Detect negation cues that should affect memory scoring.
+
+    The cue-based approach follows Japanese negation handling more closely:
+    treat 「ない」 as an auxiliary / predicate cue, then exclude purpose and
+    contrastive constructions whose surface form looks negative but should not
+    weaken memory strength.
+    """
+    if token.is_space or token.lemma_ not in NEGATION_LEMMAS:
+        return False
+    if token.dep_ == "aux" and any(child.lemma_ == "よう" for child in token.head.children):
+        return False
+    try:
+        cue_span_text = bunsetu_span(token).text
+    except Exception:
+        cue_span_text = token.text
+    if any(phrase in cue_span_text for phrase in SOFT_NEGATION_PHRASES):
+        return False
+    if not _negation_targets_intersect_signal_lemmas(token):
+        return False
+    return True
+
+
+def _negation_targets_intersect_signal_lemmas(token: Token) -> bool:
+    """Return True when the negation cue scopes over one of our signal lemmas."""
+    return bool(_negation_target_lemmas(token) & SIGNAL_NEGATION_TARGET_LEMMAS)
+
+
+def _negation_target_lemmas(token: Token) -> set[str]:
+    """Collect likely negated target lemmas around a negation cue.
+
+    This approximates cue/focus handling by climbing from the cue token to its
+    content head, then looking at that head and its local arguments.
+    """
+    target = token.head
+    while target is not target.head and target.pos_ == "AUX":
+        target = target.head
+
+    lemmas: set[str] = set()
+    if target.lemma_ and target.lemma_ != "*":
+        lemmas.add(target.lemma_)
+
+    candidate_nodes = [target, token]
+    for node in candidate_nodes:
+        for child in node.children:
+            if child.dep_ not in NEGATION_TARGET_DEPS:
+                continue
+            if child.lemma_ and child.lemma_ != "*":
+                lemmas.add(child.lemma_)
+    return lemmas
 
 
 def _has_rich_topics(parsed: ParsedText) -> bool:

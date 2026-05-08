@@ -40,15 +40,6 @@ class MessageCreateRequest(BaseModel):
     turn_id: str | None = Field(default=None, description="Client-provided turn id.")
     reply_to_turn_id: str | None = Field(default=None, description="Parent turn id when this message is a reply.")
     speaker: Literal["user", "assistant"] = Field(default="user", description="Message speaker.")
-    source: str = Field(default="chat", description="Origin of the message.")
-    memory_scope: Literal["user_memory", "assistant_trace", "shared_context_candidate"] | None = Field(
-        default=None,
-        description="Optional explicit scope override.",
-    )
-    status: Literal["asserted", "proposed", "accepted", "rejected", "unresolved"] | None = Field(
-        default=None,
-        description="Optional explicit status override.",
-    )
 
 
 @app.get("/health")
@@ -128,9 +119,6 @@ def post_message(request: MessageCreateRequest) -> dict[str, object]:
         turn_id=request.turn_id,
         reply_to_turn_id=request.reply_to_turn_id,
         speaker=request.speaker,
-        source=request.source,
-        memory_scope=request.memory_scope,
-        status=request.status,
     )
     return {
         "message": message,

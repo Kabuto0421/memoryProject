@@ -50,16 +50,12 @@ def _matches_priority(memory: dict[str, Any], priority_filter: str) -> bool:
 
 with st.form("message_form"):
     st.subheader("新規メッセージ保存")
-    form_col1, form_col2 = st.columns([1, 1])
-    with form_col1:
-        speaker = st.segmented_control(
-            "speaker",
-            options=SPEAKER_OPTIONS,
-            default="user",
-            help="この会話ターンの話者。",
-        )
-    with form_col2:
-        source = st.text_input("source", value="chat")
+    speaker = st.segmented_control(
+        "speaker",
+        options=SPEAKER_OPTIONS,
+        default="user",
+        help="この会話ターンの話者。",
+    )
     text = st.text_area(
         "保存したい会話ターン",
         height=140,
@@ -77,7 +73,6 @@ if submitted:
         message = create_message(
             text,
             speaker=speaker,
-            source=source or "chat",
             turn_id=turn_id or None,
             reply_to_turn_id=reply_to_turn_id or None,
         )

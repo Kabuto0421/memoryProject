@@ -220,6 +220,15 @@ def test_soft_negation_helper_phrase_is_not_treated_as_full_negation() -> None:
     assert "has_negation" not in analysis.reason_codes
 
 
+def test_soft_contrast_phrase_is_not_treated_as_meaningful_negation() -> None:
+    """Contrast phrases like 'じゃなくて' should not trigger negation penalties."""
+    analysis = analyze_text("ただ速いだけじゃなくて、続けやすい方法にしたい。")
+
+    assert "has_habit_intent" in analysis.reason_codes
+    assert "reflection" in analysis.memory_types
+    assert "has_negation" not in analysis.reason_codes
+
+
 def test_plain_choice_text_does_not_force_decision_support() -> None:
     """Simple selection phrasing should not always become decision support."""
     analysis = analyze_text("紙の本を選ぶ時間が結構好き。")
@@ -233,6 +242,32 @@ def test_surface_reflection_phrase_is_detected() -> None:
     analysis = analyze_text("このやり方の方が自分に合っている気がする。")
 
     assert "reflection" in analysis.memory_types
+
+
+def test_habit_like_tai_is_not_forced_into_plain_desire() -> None:
+    """Preparedness or reusable-form phrasing should be treated as intention, not plain desire."""
+    analysis = analyze_text("バイト経験を話すなら、何を学んだかまで一緒に言える形にしておきたい。")
+
+    assert "desire" not in analysis.memory_types
+    assert "task" in analysis.memory_types
+    assert "has_habit_intent" in analysis.reason_codes
+
+
+def test_execution_like_tai_is_treated_as_task_signal() -> None:
+    """Actionable 「〜たい」 should lean toward execution intent."""
+    analysis = analyze_text("保存方針の説明をREADMEにも入れておきたい。")
+
+    assert "desire" not in analysis.memory_types
+    assert "task" in analysis.memory_types
+    assert "has_execution_intent" in analysis.reason_codes
+
+
+def test_worry_patterns_capture_stateful_anxiety_text() -> None:
+    """Stateful worry phrasing like 悩む or 落ち着かない should not remain plain context."""
+    analysis = analyze_text("病院の結果を待っている間ずっと落ち着かない。")
+
+    assert "worry" in analysis.memory_types
+    assert "has_worry" in analysis.reason_codes
 
 
 def test_strong_relationship_memory_can_reach_critical() -> None:
@@ -305,7 +340,12 @@ def test_api_message_filters(monkeypatch, tmp_path) -> None:
     )
     client.post(
         "/messages",
-        json={"text": "その方針で。", "speaker": "user", "turn_id": "turn_filter_2", "status": "accepted"},
+        json={
+            "text": "その方針で。",
+            "speaker": "user",
+            "turn_id": "turn_filter_2",
+            "reply_to_turn_id": "turn_filter_1",
+        },
     )
 
     assistant_only = client.get("/messages", params={"speaker": "assistant"})

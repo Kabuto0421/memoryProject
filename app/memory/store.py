@@ -124,9 +124,6 @@ def create_memory(
     turn_id: str | None = None,
     reply_to_turn_id: str | None = None,
     speaker: str = "user",
-    source: str = "chat",
-    memory_scope: str | None = None,
-    status: str | None = None,
 ) -> dict[str, Any]:
     """Analyze and persist a conversational memory."""
     text = raw_text.strip()
@@ -135,11 +132,11 @@ def create_memory(
 
     init_db(db_path)
     analysis = analyze_text(text)
-    resolved_scope = memory_scope or _default_memory_scope(speaker)
-    resolved_status = status or _default_status(speaker)
+    resolved_scope = _default_memory_scope(speaker)
+    resolved_status = _default_status(speaker)
     reason_codes = list(analysis.reason_codes)
     if speaker == "assistant" and _has_shared_context_signal(text):
-        resolved_scope = memory_scope or "shared_context_candidate"
+        resolved_scope = "shared_context_candidate"
         reason_codes = _append_reason_code(reason_codes, "has_shared_context_signal")
 
     memory = {
@@ -147,7 +144,7 @@ def create_memory(
         "turn_id": turn_id or f"turn_{uuid.uuid4().hex[:12]}",
         "reply_to_turn_id": reply_to_turn_id,
         "speaker": speaker,
-        "source": source,
+        "source": "chat",
         "memory_scope": resolved_scope,
         "status": resolved_status,
         "raw_text": text,
@@ -258,9 +255,6 @@ def create_message(
     turn_id: str | None = None,
     reply_to_turn_id: str | None = None,
     speaker: str = "user",
-    source: str = "chat",
-    memory_scope: str | None = None,
-    status: str | None = None,
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Create a conversation turn using the extended message metadata."""
@@ -270,9 +264,6 @@ def create_message(
         turn_id=turn_id,
         reply_to_turn_id=reply_to_turn_id,
         speaker=speaker,
-        source=source,
-        memory_scope=memory_scope,
-        status=status,
     )
 
 
