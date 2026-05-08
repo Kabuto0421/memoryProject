@@ -77,3 +77,18 @@ uv run python scripts/check_ginza.py
 - GiNZA の日本語解析確認スクリプト
 
 SQLite 前提のローカル開発を想定しており、PostgreSQL / pgvector / Docker はまだ入れていません。
+
+## Current API Direction
+
+- `POST /messages`
+- `GET /messages`
+
+を会話ターン保存の正規入口として扱います。
+
+既存の
+
+- `POST /memories`
+- `GET /memories`
+
+は互換維持 API として残しています。  
+今後の UI や会話連携は、原則として `messages` 系 API を前提に進めます。

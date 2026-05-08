@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.analysis.text_analyzer import analyze_text
 from app.api.main import app, healthcheck
-from app.memory.store import create_memory, init_db, list_memories
+from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages
 
 
 def test_healthcheck_returns_ok() -> None:
@@ -27,6 +27,10 @@ def test_create_and_list_memory_with_temp_db(tmp_path) -> None:
     assert "save_strength" in memories[0]
     assert memories[0]["memory_priority"] in {"low", "medium", "high", "critical"}
     assert isinstance(memories[0]["reason_codes"], list)
+    assert memories[0]["speaker"] == "user"
+    assert memories[0]["memory_scope"] == "user_memory"
+    assert memories[0]["status"] == "asserted"
+    assert memories[0]["turn_id"].startswith("turn_")
 
 
 def test_short_ack_is_low_priority_but_still_saved(tmp_path) -> None:
@@ -38,6 +42,26 @@ def test_short_ack_is_low_priority_but_still_saved(tmp_path) -> None:
 
     assert created["memory_priority"] == "low"
     assert "is_short_ack" in created["reason_codes"]
+
+
+def test_create_message_supports_assistant_metadata_and_filters(tmp_path) -> None:
+    """Conversation turns should keep speaker metadata and list filters."""
+    db_path = str(tmp_path / "messages.db")
+    init_db(db_path)
+
+    created = create_message(
+        "この方針で進めるのがよい。",
+        db_path=db_path,
+        turn_id="turn_assistant_1",
+        speaker="assistant",
+    )
+    filtered = list_messages(db_path=db_path, speaker="assistant", status="proposed")
+
+    assert created["speaker"] == "assistant"
+    assert created["memory_scope"] == "assistant_trace"
+    assert created["status"] == "proposed"
+    assert created["turn_id"] == "turn_assistant_1"
+    assert filtered[0]["id"] == created["id"]
 
 
 def test_ginza_extracts_lemma_based_reflection_and_keywords() -> None:
@@ -56,6 +80,29 @@ def test_negated_worry_signal_is_softened() -> None:
     assert "worry" not in analysis.memory_types
     assert "has_negation" in analysis.reason_codes
     assert "has_emotion_signal" not in analysis.reason_codes
+
+
+def test_soft_negation_helper_phrase_is_not_treated_as_full_negation() -> None:
+    """Purpose phrases like '忘れないように' should not inflate negation signals."""
+    analysis = analyze_text("忘れないように明日、家族に連絡する。")
+
+    assert "has_future_reference" in analysis.reason_codes
+    assert "has_negation" not in analysis.reason_codes
+
+
+def test_plain_choice_text_does_not_force_decision_support() -> None:
+    """Simple selection phrasing should not always become decision support."""
+    analysis = analyze_text("紙の本を選ぶ時間が結構好き。")
+
+    assert "preference" in analysis.memory_types
+    assert "decision_support" not in analysis.memory_types
+
+
+def test_surface_reflection_phrase_is_detected() -> None:
+    """Common reflective phrasing should be captured even without stronger keywords."""
+    analysis = analyze_text("このやり方の方が自分に合っている気がする。")
+
+    assert "reflection" in analysis.memory_types
 
 
 def test_strong_relationship_memory_can_reach_critical() -> None:
@@ -85,3 +132,55 @@ def test_api_create_and_list_memory(monkeypatch, tmp_path) -> None:
     assert "save_strength" in create_response.json()
     assert "reason_codes" in create_response.json()
     assert "entities" in create_response.json()["memory"]
+
+
+def test_api_create_and_list_message(monkeypatch, tmp_path) -> None:
+    """The message API should persist speaker-aware conversation turns."""
+    db_path = str(tmp_path / "api_messages.db")
+    monkeypatch.setattr("app.memory.store.DB_PATH", tmp_path / "api_messages.db")
+    monkeypatch.setattr("app.core.settings.DB_PATH", tmp_path / "api_messages.db")
+    init_db(db_path)
+
+    client = TestClient(app)
+    create_response = client.post(
+        "/messages",
+        json={
+            "text": "今後は全件保存で進める提案です。",
+            "speaker": "assistant",
+            "turn_id": "turn_api_1",
+        },
+    )
+    list_response = client.get("/messages", params={"speaker": "assistant"})
+
+    assert create_response.status_code == 200
+    assert list_response.status_code == 200
+    assert list_response.json()["count"] >= 1
+    assert create_response.json()["message"]["speaker"] == "assistant"
+    assert create_response.json()["message"]["memory_scope"] == "assistant_trace"
+    assert create_response.json()["message"]["status"] == "proposed"
+
+
+def test_api_message_filters(monkeypatch, tmp_path) -> None:
+    """Message list filters should narrow the result set by speaker and status."""
+    db_path = str(tmp_path / "api_message_filters.db")
+    monkeypatch.setattr("app.memory.store.DB_PATH", tmp_path / "api_message_filters.db")
+    monkeypatch.setattr("app.core.settings.DB_PATH", tmp_path / "api_message_filters.db")
+    init_db(db_path)
+
+    client = TestClient(app)
+    client.post(
+        "/messages",
+        json={"text": "この方針で進めるのがよい。", "speaker": "assistant", "turn_id": "turn_filter_1"},
+    )
+    client.post(
+        "/messages",
+        json={"text": "その方針で。", "speaker": "user", "turn_id": "turn_filter_2", "status": "accepted"},
+    )
+
+    assistant_only = client.get("/messages", params={"speaker": "assistant"})
+    accepted_only = client.get("/messages", params={"status": "accepted"})
+
+    assert assistant_only.status_code == 200
+    assert accepted_only.status_code == 200
+    assert all(message["speaker"] == "assistant" for message in assistant_only.json()["messages"])
+    assert all(message["status"] == "accepted" for message in accepted_only.json()["messages"])

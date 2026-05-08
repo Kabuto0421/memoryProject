@@ -13,23 +13,23 @@ TEXT_EMOTION_RULES = {
     "joy": ["嬉しい", "楽しい", "最高", "安心", "よかった"],
     "sadness": ["悲しい", "寂しい", "つらい", "しんどい"],
     "frustration": ["面倒", "困る", "嫌", "詰まった", "わからない", "おかしくないか"],
-    "anxiety": ["不安", "怖い", "心配", "気になる"],
-    "curiosity": ["気になる", "知りたい", "興味", "試したい"],
+    "anxiety": ["不安", "怖い", "心配"],
+    "curiosity": ["知りたい", "興味", "試したい"],
 }
 
 LEMMA_EMOTION_RULES = {
     "joy": {"嬉しい", "楽しい", "安心"},
     "sadness": {"悲しい", "寂しい", "つらい", "しんどい"},
-    "frustration": {"困る", "嫌", "詰まる", "わかる"},
-    "anxiety": {"不安", "怖い", "心配", "気になる"},
-    "curiosity": {"知る", "興味", "試す", "気になる"},
+    "frustration": {"困る", "嫌", "詰まる"},
+    "anxiety": {"不安", "怖い", "心配"},
+    "curiosity": {"知る", "興味", "試す"},
 }
 
 TEXT_MEMORY_TYPE_RULES = {
     "preference": ["好き", "嫌い", "苦手", "避けたい"],
     "desire": ["したい", "ほしい", "欲しい"],
     "worry": ["不安", "心配", "困る", "怖い"],
-    "reflection": ["思う", "感じる", "おかしくないか", "違和感"],
+    "reflection": ["思う", "感じる", "気がする", "おかしくないか", "違和感"],
     "relationship": ["友達", "家族", "母", "父", "恋人", "先輩", "後輩"],
     "decision_support": ["決めてほしい", "選んでほしい", "どれ", "迷う"],
     "task": ["やる", "作る", "確認", "調べる", "直す"],
@@ -41,7 +41,7 @@ LEMMA_MEMORY_TYPE_RULES = {
     "worry": {"不安", "心配", "困る", "怖い"},
     "reflection": {"思う", "感じる", "感ずる", "違和感"},
     "relationship": {"友達", "家族", "母", "父", "恋人", "先輩", "後輩"},
-    "decision_support": {"決める", "選ぶ", "迷う"},
+    "decision_support": {"決める", "迷う"},
     "task": {"やる", "作る", "確認", "調べる", "直す"},
 }
 
@@ -52,6 +52,8 @@ SHORT_ACK_TERMS = ["ありがとう", "了解", "OK", "なるほど", "たしか
 TARGET_POS = {"NOUN", "PROPN", "VERB", "ADJ"}
 TOPIC_POS = {"NOUN", "PROPN"}
 NEGATION_LEMMAS = {"ない", "ぬ", "ず"}
+SOFT_NEGATION_CHILD_LEMMAS = {"よう", "ため"}
+NEGATION_TARGET_DEPS = {"nsubj", "obj", "iobj", "obl", "advmod", "amod", "ccomp", "xcomp"}
 
 
 @dataclass(slots=True)
@@ -290,7 +292,7 @@ def _collect_reason_codes(
         reasons.append("has_sensitive_topic")
     if any(marker in text for marker in TECHNICAL_MARKERS):
         reasons.append("has_technical_marker")
-    if len(parsed.topics) >= 3:
+    if _has_rich_topics(parsed):
         reasons.append("has_rich_topics")
     if parsed.entities:
         reasons.append("has_named_entity")
@@ -342,7 +344,7 @@ def _score_text(
     if emotion["primary"] != "neutral":
         affective += 0.35
         persistence += 0.1
-    if len(parsed.topics) >= 3:
+    if _has_rich_topics(parsed):
         indexability += 0.2
     if parsed.entities:
         indexability += 0.15
@@ -385,7 +387,7 @@ def _score_save_strength(scores: dict[str, float], reason_codes: list[str]) -> f
     if "has_future_reference" in reason_codes:
         strength += 0.05
     if "has_named_entity" in reason_codes:
-        strength += 0.05
+        strength += 0.02
     if "has_reflection" in reason_codes:
         strength += 0.05
     if "has_worry" in reason_codes:
@@ -426,14 +428,33 @@ def _is_negated_surface_match(term: str, parsed: ParsedText) -> bool:
 
 def _is_negated(token: Token) -> bool:
     """Return True when a token is modified by a negation marker."""
-    if token.lemma_ in NEGATION_LEMMAS:
+    if token.is_space or token.lemma_ in NEGATION_LEMMAS:
+        return False
+
+    child_lemmas = {child.lemma_ for child in token.children}
+    if child_lemmas & SOFT_NEGATION_CHILD_LEMMAS:
+        return False
+    if any(child.lemma_ in NEGATION_LEMMAS or child.dep_ == "neg" for child in token.children):
         return True
-    if token.head is not token and token.head.lemma_ in NEGATION_LEMMAS:
+
+    if token.head is token:
+        return False
+
+    head_child_lemmas = {child.lemma_ for child in token.head.children}
+    if head_child_lemmas & SOFT_NEGATION_CHILD_LEMMAS:
+        return False
+    if token.dep_ not in NEGATION_TARGET_DEPS:
+        return False
+    if token.head.lemma_ in NEGATION_LEMMAS:
         return True
-    for child in token.children:
-        if child.lemma_ in NEGATION_LEMMAS or child.dep_ == "neg":
-            return True
+    if any(child.lemma_ in NEGATION_LEMMAS or child.dep_ == "neg" for child in token.head.children):
+        return True
     return False
+
+
+def _has_rich_topics(parsed: ParsedText) -> bool:
+    """Return True when the parse carries enough topic variety to matter."""
+    return len(parsed.topics) >= 4 or (len(parsed.topics) >= 3 and bool(parsed.entities))
 
 
 def _build_recall_policy(text: str, scores: dict[str, float]) -> dict[str, object]:

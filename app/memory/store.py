@@ -33,6 +33,12 @@ def init_db(db_path: str | None = None) -> None:
             """
             CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL,
+                reply_to_turn_id TEXT,
+                speaker TEXT NOT NULL DEFAULT 'user',
+                source TEXT NOT NULL DEFAULT 'chat',
+                memory_scope TEXT NOT NULL DEFAULT 'user_memory',
+                status TEXT NOT NULL DEFAULT 'asserted',
                 raw_text TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 memory_types_json TEXT NOT NULL,
@@ -63,9 +69,32 @@ def init_db(db_path: str | None = None) -> None:
             conn.execute("ALTER TABLE memories ADD COLUMN reason_codes_json TEXT NOT NULL DEFAULT '[]'")
         if "entities_json" not in existing_columns:
             conn.execute("ALTER TABLE memories ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+        if "turn_id" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''")
+            conn.execute("UPDATE memories SET turn_id = id WHERE turn_id = ''")
+        if "reply_to_turn_id" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN reply_to_turn_id TEXT")
+        if "speaker" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN speaker TEXT NOT NULL DEFAULT 'user'")
+        if "source" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'chat'")
+        if "memory_scope" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN memory_scope TEXT NOT NULL DEFAULT 'user_memory'")
+        if "status" not in existing_columns:
+            conn.execute("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'asserted'")
 
 
-def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
+def create_memory(
+    raw_text: str,
+    db_path: str | None = None,
+    *,
+    turn_id: str | None = None,
+    reply_to_turn_id: str | None = None,
+    speaker: str = "user",
+    source: str = "chat",
+    memory_scope: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
     """Analyze and persist a conversational memory."""
     text = raw_text.strip()
     if not text:
@@ -73,8 +102,16 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
 
     init_db(db_path)
     analysis = analyze_text(text)
+    resolved_scope = memory_scope or _default_memory_scope(speaker)
+    resolved_status = status or _default_status(speaker)
     memory = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
+        "turn_id": turn_id or f"turn_{uuid.uuid4().hex[:12]}",
+        "reply_to_turn_id": reply_to_turn_id,
+        "speaker": speaker,
+        "source": source,
+        "memory_scope": resolved_scope,
+        "status": resolved_status,
         "raw_text": text,
         "summary": analysis.summary,
         "memory_types": analysis.memory_types,
@@ -96,13 +133,20 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
         conn.execute(
             """
             INSERT INTO memories (
-                id, raw_text, summary, memory_types_json, topics_json, keywords_json,
+                id, turn_id, reply_to_turn_id, speaker, source, memory_scope, status,
+                raw_text, summary, memory_types_json, topics_json, keywords_json,
                 entities_json, facets_json, scores_json, emotion_json, recall_policy_json, safety_json,
                 save_strength, memory_priority, reason_codes_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory["id"],
+                memory["turn_id"],
+                memory["reply_to_turn_id"],
+                memory["speaker"],
+                memory["source"],
+                memory["memory_scope"],
+                memory["status"],
                 memory["raw_text"],
                 memory["summary"],
                 _dump_json(memory["memory_types"]),
@@ -124,20 +168,83 @@ def create_memory(raw_text: str, db_path: str | None = None) -> dict[str, Any]:
     return memory
 
 
-def list_memories(limit: int = 50, db_path: str | None = None) -> list[dict[str, Any]]:
+def list_memories(
+    limit: int = 50,
+    db_path: str | None = None,
+    *,
+    speaker: str | None = None,
+    memory_scope: str | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
     """Return recent memories in reverse chronological order."""
     init_db(db_path)
+    query = """
+        SELECT *
+        FROM memories
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if speaker:
+        clauses.append("speaker = ?")
+        params.append(speaker)
+    if memory_scope:
+        clauses.append("memory_scope = ?")
+        params.append(memory_scope)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += """
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
     with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM memories
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(query, tuple(params)).fetchall()
     return [_row_to_memory(row) for row in rows]
+
+
+def create_message(
+    text: str,
+    *,
+    turn_id: str | None = None,
+    reply_to_turn_id: str | None = None,
+    speaker: str = "user",
+    source: str = "chat",
+    memory_scope: str | None = None,
+    status: str | None = None,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    """Create a conversation turn using the extended message metadata."""
+    return create_memory(
+        text,
+        db_path=db_path,
+        turn_id=turn_id,
+        reply_to_turn_id=reply_to_turn_id,
+        speaker=speaker,
+        source=source,
+        memory_scope=memory_scope,
+        status=status,
+    )
+
+
+def list_messages(
+    limit: int = 50,
+    *,
+    speaker: str | None = None,
+    memory_scope: str | None = None,
+    status: str | None = None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """List stored conversation turns with optional metadata filters."""
+    return list_memories(
+        limit=limit,
+        db_path=db_path,
+        speaker=speaker,
+        memory_scope=memory_scope,
+        status=status,
+    )
 
 
 def _dump_json(value: Any) -> str:
@@ -151,6 +258,12 @@ def _load_json(value: str) -> Any:
 def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["id"],
+        "turn_id": row["turn_id"],
+        "reply_to_turn_id": row["reply_to_turn_id"],
+        "speaker": row["speaker"],
+        "source": row["source"],
+        "memory_scope": row["memory_scope"],
+        "status": row["status"],
         "raw_text": row["raw_text"],
         "summary": row["summary"],
         "memory_types": _load_json(row["memory_types_json"]),
@@ -168,3 +281,15 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _default_memory_scope(speaker: str) -> str:
+    if speaker == "assistant":
+        return "assistant_trace"
+    return "user_memory"
+
+
+def _default_status(speaker: str) -> str:
+    if speaker == "assistant":
+        return "proposed"
+    return "asserted"
