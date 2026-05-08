@@ -75,6 +75,21 @@ def init_db(db_path: str | None = None) -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS shared_contexts (
+                id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_turn_ids_json TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                importance REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT
+            )
+            """
+        )
         existing_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()
         }
@@ -159,7 +174,8 @@ def create_memory(
                 if _can_promote_to_accepted(referenced):
                     memory["memory_scope"] = "shared_context_candidate"
                     memory["status"] = "accepted"
-                    _mark_message_accepted(conn, referenced["turn_id"])
+                    promoted = _mark_message_accepted(conn, referenced["turn_id"])
+                    _ensure_shared_context_from_messages(conn, proposal=promoted, acceptance=memory)
         conn.execute(
             """
             INSERT INTO memories (
@@ -277,6 +293,22 @@ def list_messages(
     )
 
 
+def list_shared_contexts(limit: int = 50, db_path: str | None = None) -> list[dict[str, Any]]:
+    """List stored shared contexts in reverse chronological order."""
+    init_db(db_path)
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM shared_contexts
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [_row_to_shared_context(row) for row in rows]
+
+
 def _dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -308,6 +340,20 @@ def _row_to_memory(row: sqlite3.Row) -> dict[str, Any]:
         "save_strength": row["save_strength"],
         "memory_priority": row["memory_priority"],
         "reason_codes": _load_json(row["reason_codes_json"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _row_to_shared_context(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "summary": row["summary"],
+        "detail": row["detail"],
+        "status": row["status"],
+        "source_turn_ids": _load_json(row["source_turn_ids_json"]),
+        "tags": _load_json(row["tags_json"]),
+        "importance": row["importance"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -374,10 +420,10 @@ def _can_promote_to_accepted(referenced: dict[str, Any] | None) -> bool:
     )
 
 
-def _mark_message_accepted(conn: sqlite3.Connection, turn_id: str) -> None:
+def _mark_message_accepted(conn: sqlite3.Connection, turn_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT reason_codes_json
+        SELECT *
         FROM memories
         WHERE turn_id = ?
         ORDER BY created_at DESC
@@ -386,8 +432,9 @@ def _mark_message_accepted(conn: sqlite3.Connection, turn_id: str) -> None:
         (turn_id,),
     ).fetchone()
     if row is None:
-        return
-    reason_codes = _append_reason_code(_load_json(row["reason_codes_json"]), "accepted_by_user_ack")
+        return None
+    message = _row_to_memory(row)
+    reason_codes = _append_reason_code(message["reason_codes"], "accepted_by_user_ack")
     conn.execute(
         """
         UPDATE memories
@@ -396,3 +443,72 @@ def _mark_message_accepted(conn: sqlite3.Connection, turn_id: str) -> None:
         """,
         ("accepted", utc_now_iso(), _dump_json(reason_codes), turn_id),
     )
+    message["status"] = "accepted"
+    message["updated_at"] = utc_now_iso()
+    message["reason_codes"] = reason_codes
+    return message
+
+
+def _ensure_shared_context_from_messages(
+    conn: sqlite3.Connection,
+    *,
+    proposal: dict[str, Any] | None,
+    acceptance: dict[str, Any],
+) -> None:
+    if proposal is None:
+        return
+    context_id = f"ctx_{proposal['turn_id']}"
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM shared_contexts
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (context_id,),
+    ).fetchone()
+    if existing is not None:
+        return
+
+    source_turn_ids = [proposal["turn_id"], acceptance["turn_id"]]
+    tags = _unique_strings(
+        proposal["memory_types"]
+        + acceptance["memory_types"]
+        + [proposal["memory_scope"], acceptance["memory_scope"]]
+    )
+    detail = (
+        f"proposal: {proposal['raw_text']}\n"
+        f"acceptance: {acceptance['raw_text']}"
+    )
+    importance = round(max(proposal["save_strength"], acceptance["save_strength"]), 2)
+    now = utc_now_iso()
+    conn.execute(
+        """
+        INSERT INTO shared_contexts (
+            id, summary, detail, status, source_turn_ids_json, tags_json,
+            importance, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            context_id,
+            proposal["summary"],
+            detail,
+            "accepted",
+            _dump_json(source_turn_ids),
+            _dump_json(tags),
+            importance,
+            now,
+            None,
+        ),
+    )
+
+
+def _unique_strings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result

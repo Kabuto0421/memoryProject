@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages
+from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages, list_shared_contexts
 
 
 @asynccontextmanager
@@ -66,6 +66,13 @@ def get_messages(
     """List recent conversation turns with optional metadata filters."""
     messages = list_messages(limit=limit, speaker=speaker, memory_scope=memory_scope, status=status)
     return {"count": len(messages), "messages": messages}
+
+
+@app.get("/context/shared")
+def get_shared_contexts(limit: int = 20) -> dict[str, object]:
+    """List shared contexts derived from accepted conversation turns."""
+    shared_contexts = list_shared_contexts(limit=limit)
+    return {"count": len(shared_contexts), "shared_contexts": shared_contexts}
 
 
 @app.post("/memories")

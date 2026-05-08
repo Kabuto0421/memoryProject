@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.analysis.text_analyzer import analyze_text
 from app.api.main import app, healthcheck
-from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages
+from app.memory.store import create_memory, create_message, init_db, list_memories, list_messages, list_shared_contexts
 
 
 def test_healthcheck_returns_ok() -> None:
@@ -110,6 +110,34 @@ def test_user_acceptance_promotes_referenced_proposal(tmp_path) -> None:
     promoted = next(message for message in refreshed_messages if message["turn_id"] == "turn_proposal_1")
     assert promoted["status"] == "accepted"
     assert "accepted_by_user_ack" in promoted["reason_codes"]
+
+
+def test_shared_context_is_created_from_accepted_flow(tmp_path) -> None:
+    """Accepted proposal flows should materialize into shared contexts."""
+    db_path = str(tmp_path / "shared_contexts.db")
+    init_db(db_path)
+
+    create_message(
+        "今後はこの方針で進めるのがよい。",
+        db_path=db_path,
+        turn_id="turn_ctx_proposal_1",
+        speaker="assistant",
+    )
+    create_message(
+        "それでお願い。",
+        db_path=db_path,
+        turn_id="turn_ctx_accept_1",
+        reply_to_turn_id="turn_ctx_proposal_1",
+        speaker="user",
+    )
+    contexts = list_shared_contexts(db_path=db_path)
+
+    assert len(contexts) == 1
+    assert contexts[0]["id"] == "ctx_turn_ctx_proposal_1"
+    assert contexts[0]["status"] == "accepted"
+    assert contexts[0]["summary"].startswith("今後はこの方針")
+    assert contexts[0]["source_turn_ids"] == ["turn_ctx_proposal_1", "turn_ctx_accept_1"]
+    assert "shared_context_candidate" in contexts[0]["tags"]
 
 
 def test_ginza_extracts_lemma_based_reflection_and_keywords() -> None:
@@ -267,3 +295,35 @@ def test_api_user_acceptance_promotes_assistant_candidate(monkeypatch, tmp_path)
     assert acceptance.json()["message"]["status"] == "accepted"
     assert acceptance.json()["message"]["memory_scope"] == "shared_context_candidate"
     assert any(message["turn_id"] == "turn_api_proposal" for message in accepted_messages.json()["messages"])
+
+
+def test_api_lists_shared_contexts(monkeypatch, tmp_path) -> None:
+    """The shared context API should return contexts generated from accepted flows."""
+    db_path = str(tmp_path / "api_shared_contexts.db")
+    monkeypatch.setattr("app.memory.store.DB_PATH", tmp_path / "api_shared_contexts.db")
+    monkeypatch.setattr("app.core.settings.DB_PATH", tmp_path / "api_shared_contexts.db")
+    init_db(db_path)
+
+    client = TestClient(app)
+    client.post(
+        "/messages",
+        json={
+            "text": "今後はこの方針で進めるのがよい。",
+            "speaker": "assistant",
+            "turn_id": "turn_api_ctx_proposal",
+        },
+    )
+    client.post(
+        "/messages",
+        json={
+            "text": "じゃあそれで。",
+            "speaker": "user",
+            "turn_id": "turn_api_ctx_accept",
+            "reply_to_turn_id": "turn_api_ctx_proposal",
+        },
+    )
+    shared_response = client.get("/context/shared")
+
+    assert shared_response.status_code == 200
+    assert shared_response.json()["count"] == 1
+    assert shared_response.json()["shared_contexts"][0]["id"] == "ctx_turn_api_ctx_proposal"
