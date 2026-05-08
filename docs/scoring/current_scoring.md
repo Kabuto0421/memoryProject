@@ -15,6 +15,9 @@
 
 現状は、学習や統計モデルではなく **GiNZA + ルールベース** の簡易判定です。
 
+ただし現在は、純粋な文解析だけでなく、**保存時の会話メタデータ判定** も入っています。  
+具体的には `speaker`, `reply_to_turn_id`, 提案調の表現、承認っぽい短文を見て、`memory_scope` と `status` を後段で補正します。
+
 ## 入力から保存までの流れ
 
 1. 入力文の前後空白を除去する
@@ -29,6 +32,55 @@
 10. `save_strength` と `memory_priority` を計算する
 11. `recall_policy`, `safety`, `facets` を組み立てる
 12. SQLite に JSON として保存する
+
+## 解析後に入る会話メタデータ判定
+
+GiNZA ベースの `analyze_text()` が返す結果に対して、保存時に追加で以下を見ます。
+
+- `speaker`
+- `reply_to_turn_id`
+- assistant 側の提案調表現
+- user 側の承認っぽい短文
+
+この後段判定で、`memory_scope` と `status` を一部補正します。
+
+### assistant proposal の扱い
+
+assistant 発話に以下のような提案調表現が含まれる場合:
+
+- `方針`
+- `で進める`
+- `を使う`
+- `にする`
+- `がよい`
+- `がいい`
+
+その発話は通常の `assistant_trace` ではなく、`shared_context_candidate` に寄せます。  
+このとき `reason_codes` には `has_shared_context_signal` を追加します。
+
+### user acceptance の扱い
+
+user 発話が以下のような短い承認表現に当たる場合:
+
+- `それで`
+- `それでお願い`
+- `それでお願いします`
+- `OK`
+- `その方針で`
+- `じゃあそれで`
+
+さらに `reply_to_turn_id` があり、その参照先が `speaker=assistant` かつ `memory_scope=shared_context_candidate` かつ `status=proposed` なら:
+
+- user 側の返信は `status=accepted`
+- user 側の返信も `memory_scope=shared_context_candidate`
+- 参照された assistant proposal も `status=accepted`
+
+になります。
+
+このとき `reason_codes` は次のように増えます。
+
+- user 承認文: `has_user_acceptance_signal`
+- 昇格された assistant proposal: `accepted_by_user_ack`
 
 ## 現在使っている判定材料
 
@@ -73,6 +125,11 @@ embedding や学習済み分類器はまだ使っていません。
 - `save_strength`
 - `memory_priority`
 - `reason_codes`
+- `speaker`
+- `turn_id`
+- `reply_to_turn_id`
+- `memory_scope`
+- `status`
 
 このうち、`topics`, `keywords`, `entities` は GiNZA 導入の恩恵を最も受けている部分です。
 

@@ -11,6 +11,23 @@ from typing import Any
 from app.analysis.text_analyzer import analyze_text
 from app.core.settings import DB_PATH, ensure_data_dir
 
+ASSISTANT_SHARED_CONTEXT_TERMS = (
+    "方針",
+    "で進める",
+    "を使う",
+    "にする",
+    "がよい",
+    "がいい",
+)
+USER_ACCEPTANCE_TERMS = {
+    "それで",
+    "それでお願い",
+    "それでお願いします",
+    "ok",
+    "その方針で",
+    "じゃあそれで",
+}
+
 
 def utc_now_iso() -> str:
     """Return the current UTC time as an ISO string."""
@@ -104,6 +121,11 @@ def create_memory(
     analysis = analyze_text(text)
     resolved_scope = memory_scope or _default_memory_scope(speaker)
     resolved_status = status or _default_status(speaker)
+    reason_codes = list(analysis.reason_codes)
+    if speaker == "assistant" and _has_shared_context_signal(text):
+        resolved_scope = memory_scope or "shared_context_candidate"
+        reason_codes = _append_reason_code(reason_codes, "has_shared_context_signal")
+
     memory = {
         "id": f"mem_{uuid.uuid4().hex[:12]}",
         "turn_id": turn_id or f"turn_{uuid.uuid4().hex[:12]}",
@@ -125,11 +147,19 @@ def create_memory(
         "safety": analysis.safety,
         "save_strength": analysis.save_strength,
         "memory_priority": analysis.memory_priority,
-        "reason_codes": analysis.reason_codes,
+        "reason_codes": reason_codes,
         "created_at": utc_now_iso(),
         "updated_at": None,
     }
     with get_connection(db_path) as conn:
+        if speaker == "user" and _is_user_acceptance_text(text):
+            memory["reason_codes"] = _append_reason_code(memory["reason_codes"], "has_user_acceptance_signal")
+            if reply_to_turn_id:
+                referenced = _find_message_by_turn_id(conn, reply_to_turn_id)
+                if _can_promote_to_accepted(referenced):
+                    memory["memory_scope"] = "shared_context_candidate"
+                    memory["status"] = "accepted"
+                    _mark_message_accepted(conn, referenced["turn_id"])
         conn.execute(
             """
             INSERT INTO memories (
@@ -293,3 +323,76 @@ def _default_status(speaker: str) -> str:
     if speaker == "assistant":
         return "proposed"
     return "asserted"
+
+
+def _has_shared_context_signal(text: str) -> bool:
+    normalized = text.strip()
+    return any(term in normalized for term in ASSISTANT_SHARED_CONTEXT_TERMS)
+
+
+def _is_user_acceptance_text(text: str) -> bool:
+    normalized = (
+        text.strip()
+        .lower()
+        .replace("。", "")
+        .replace("！", "")
+        .replace("!", "")
+        .replace(" ", "")
+    )
+    return normalized in USER_ACCEPTANCE_TERMS
+
+
+def _append_reason_code(reason_codes: list[str], code: str) -> list[str]:
+    if code in reason_codes:
+        return reason_codes
+    return [*reason_codes, code]
+
+
+def _find_message_by_turn_id(conn: sqlite3.Connection, turn_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM memories
+        WHERE turn_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (turn_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_memory(row)
+
+
+def _can_promote_to_accepted(referenced: dict[str, Any] | None) -> bool:
+    if referenced is None:
+        return False
+    return (
+        referenced["speaker"] == "assistant"
+        and referenced["memory_scope"] == "shared_context_candidate"
+        and referenced["status"] == "proposed"
+    )
+
+
+def _mark_message_accepted(conn: sqlite3.Connection, turn_id: str) -> None:
+    row = conn.execute(
+        """
+        SELECT reason_codes_json
+        FROM memories
+        WHERE turn_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (turn_id,),
+    ).fetchone()
+    if row is None:
+        return
+    reason_codes = _append_reason_code(_load_json(row["reason_codes_json"]), "accepted_by_user_ack")
+    conn.execute(
+        """
+        UPDATE memories
+        SET status = ?, updated_at = ?, reason_codes_json = ?
+        WHERE turn_id = ?
+        """,
+        ("accepted", utc_now_iso(), _dump_json(reason_codes), turn_id),
+    )

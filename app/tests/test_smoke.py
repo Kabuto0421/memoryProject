@@ -58,10 +58,58 @@ def test_create_message_supports_assistant_metadata_and_filters(tmp_path) -> Non
     filtered = list_messages(db_path=db_path, speaker="assistant", status="proposed")
 
     assert created["speaker"] == "assistant"
-    assert created["memory_scope"] == "assistant_trace"
+    assert created["memory_scope"] == "shared_context_candidate"
     assert created["status"] == "proposed"
     assert created["turn_id"] == "turn_assistant_1"
+    assert "has_shared_context_signal" in created["reason_codes"]
     assert filtered[0]["id"] == created["id"]
+
+
+def test_plain_assistant_explanation_stays_assistant_trace(tmp_path) -> None:
+    """Assistant messages without proposal phrasing should remain plain traces."""
+    db_path = str(tmp_path / "assistant_trace.db")
+    init_db(db_path)
+
+    created = create_message(
+        "これは現在の保存構造の説明です。",
+        db_path=db_path,
+        turn_id="turn_assistant_trace_1",
+        speaker="assistant",
+    )
+
+    assert created["memory_scope"] == "assistant_trace"
+    assert created["status"] == "proposed"
+    assert "has_shared_context_signal" not in created["reason_codes"]
+
+
+def test_user_acceptance_promotes_referenced_proposal(tmp_path) -> None:
+    """A user acknowledgement should promote a referenced assistant proposal."""
+    db_path = str(tmp_path / "accepted_flow.db")
+    init_db(db_path)
+
+    proposal = create_message(
+        "今後はこの方針で進めるのがよい。",
+        db_path=db_path,
+        turn_id="turn_proposal_1",
+        speaker="assistant",
+    )
+    acceptance = create_message(
+        "その方針で。",
+        db_path=db_path,
+        turn_id="turn_accept_1",
+        reply_to_turn_id="turn_proposal_1",
+        speaker="user",
+    )
+    refreshed_messages = list_messages(db_path=db_path, status="accepted")
+
+    assert proposal["memory_scope"] == "shared_context_candidate"
+    assert acceptance["memory_scope"] == "shared_context_candidate"
+    assert acceptance["status"] == "accepted"
+    assert "has_user_acceptance_signal" in acceptance["reason_codes"]
+    assert any(message["turn_id"] == "turn_proposal_1" for message in refreshed_messages)
+    promoted = next(message for message in refreshed_messages if message["turn_id"] == "turn_proposal_1")
+    assert promoted["status"] == "accepted"
+    assert "accepted_by_user_ack" in promoted["reason_codes"]
 
 
 def test_ginza_extracts_lemma_based_reflection_and_keywords() -> None:
@@ -156,8 +204,9 @@ def test_api_create_and_list_message(monkeypatch, tmp_path) -> None:
     assert list_response.status_code == 200
     assert list_response.json()["count"] >= 1
     assert create_response.json()["message"]["speaker"] == "assistant"
-    assert create_response.json()["message"]["memory_scope"] == "assistant_trace"
+    assert create_response.json()["message"]["memory_scope"] == "shared_context_candidate"
     assert create_response.json()["message"]["status"] == "proposed"
+    assert "has_shared_context_signal" in create_response.json()["message"]["reason_codes"]
 
 
 def test_api_message_filters(monkeypatch, tmp_path) -> None:
@@ -184,3 +233,37 @@ def test_api_message_filters(monkeypatch, tmp_path) -> None:
     assert accepted_only.status_code == 200
     assert all(message["speaker"] == "assistant" for message in assistant_only.json()["messages"])
     assert all(message["status"] == "accepted" for message in accepted_only.json()["messages"])
+
+
+def test_api_user_acceptance_promotes_assistant_candidate(monkeypatch, tmp_path) -> None:
+    """The API should promote a referenced assistant proposal to accepted."""
+    db_path = str(tmp_path / "api_acceptance.db")
+    monkeypatch.setattr("app.memory.store.DB_PATH", tmp_path / "api_acceptance.db")
+    monkeypatch.setattr("app.core.settings.DB_PATH", tmp_path / "api_acceptance.db")
+    init_db(db_path)
+
+    client = TestClient(app)
+    proposal = client.post(
+        "/messages",
+        json={
+            "text": "今後はこの方針で進めるのがよい。",
+            "speaker": "assistant",
+            "turn_id": "turn_api_proposal",
+        },
+    )
+    acceptance = client.post(
+        "/messages",
+        json={
+            "text": "それでお願い。",
+            "speaker": "user",
+            "turn_id": "turn_api_acceptance",
+            "reply_to_turn_id": "turn_api_proposal",
+        },
+    )
+    accepted_messages = client.get("/messages", params={"status": "accepted"})
+
+    assert proposal.status_code == 200
+    assert acceptance.status_code == 200
+    assert acceptance.json()["message"]["status"] == "accepted"
+    assert acceptance.json()["message"]["memory_scope"] == "shared_context_candidate"
+    assert any(message["turn_id"] == "turn_api_proposal" for message in accepted_messages.json()["messages"])
